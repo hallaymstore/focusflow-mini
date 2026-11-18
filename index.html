@@ -172,7 +172,7 @@ function renderGame(){
 state.answered=false;state.saving=false;state.lastFeedback=null;
 const s=state.session,n=s.index+1,q=curQuestion();
 if(!q){state.error='Savollarni yuklashda xatolik';setPhase('home');return}
-$('#screen').innerHTML='<section class="game-layout"><div class="glass game-main"><div class="game-top"><div class="game-progress-label">SAVOL <strong>'+String(n).padStart(2,'0')+'</strong> / '+state.questions.length+'</div><div class="pill">🇺🇿 '+esc(s.fullName)+'</div></div><div class="bar"><div style="width:'+((n-1)/state.questions.length*100)+'%"></div></div><div class="question-zone"><div class="question-tag">✦ SAVOL #'+n+'</div><h1 class="question-text">'+esc(q.text)+'</h1></div><div class="answers">'+q.choices.map((ans,i)=>'<button class="answer '+['red','blue','yellow','green'][i]+'" data-answer="'+i+'"><span class="a-ico">'+['▲','◆','●','■'][i]+'</span><span>'+esc(ans)+'</span><span class="status" id="mark'+i+'"></span></button>').join('')+'</div><div class="feedback hidden" id="feedback"></div></div><aside class="glass game-side"><div class="side-section"><div class="side-label">⏳ VAQT</div><div class="timer-display" id="timerCircle"><div class="timer-inside"><div class="timer-num" id="timerNum">20</div><div class="timer-unit">SONIYA</div></div></div></div><div class="side-section"><div class="side-label">⭐ BALL</div><div class="side-score" id="scoreNum">'+s.score.toLocaleString('en-US')+'</div><div class="stats-row"><span>✅ To‘g‘ri</span><b>'+s.correct+'</b></div><div class="stats-row"><span>🔥 Seriya</span><b>'+s.streak+'</b></div></div><div class="side-section"><div class="side-label">💎 GAME MODE</div><div class="side-mini">'+(s.streak>=5?'👑':s.streak>=3?'🏆':'🚀')+'</div><div class="tiny-help">Tezroq javob bering va ko‘proq XP oling!</div></div></aside></section>';
+$('#screen').innerHTML='<section class="game-layout"><div class="glass game-main"><div class="game-top"><div class="game-progress-label">SAVOL <strong>'+String(n).padStart(2,'0')+'</strong> / '+state.questions.length+'</div><div class="pill">🇺🇿 '+esc(s.fullName)+'</div></div><div class="bar"><div style="width:'+((n-1)/state.questions.length*100)+'%"></div></div><div class="question-zone"><div class="question-tag">✦ SAVOL #'+n+'</div><h1 class="question-text">'+esc(q.text)+'</h1></div><div class="answers">'+(s.choices||q.choices).map((ans,i)=>'<button class="answer '+['red','blue','yellow','green'][i]+'" data-answer="'+i+'"><span class="a-ico">'+['▲','◆','●','■'][i]+'</span><span>'+esc(ans)+'</span><span class="status" id="mark'+i+'"></span></button>').join('')+'</div><div class="feedback hidden" id="feedback"></div></div><aside class="glass game-side"><div class="side-section"><div class="side-label">⏳ VAQT</div><div class="timer-display" id="timerCircle"><div class="timer-inside"><div class="timer-num" id="timerNum">20</div><div class="timer-unit">SONIYA</div></div></div></div><div class="side-section"><div class="side-label">⭐ BALL</div><div class="side-score" id="scoreNum">'+s.score.toLocaleString('en-US')+'</div><div class="stats-row"><span>✅ To‘g‘ri</span><b>'+s.correct+'</b></div><div class="stats-row"><span>🔥 Seriya</span><b>'+s.streak+'</b></div></div><div class="side-section"><div class="side-label">💎 GAME MODE</div><div class="side-mini">'+(s.streak>=5?'👑':s.streak>=3?'🏆':'🚀')+'</div><div class="tiny-help">Tezroq javob bering va ko‘proq XP oling!</div></div></aside></section>';
 document.querySelectorAll('[data-answer]').forEach(b=>b.onclick=()=>answer(Number(b.dataset.answer)));
 clearInterval(state.timer);
 state.timer=setInterval(updateTimer,220);
@@ -194,11 +194,11 @@ if(state.answered||state.saving||state.phase!=='game')return;
 state.saving=true;clearInterval(state.timer);
 const buttons=[...document.querySelectorAll('[data-answer]')];buttons.forEach(b=>b.disabled=true);
 try{
-const s=state.session;const d=await api('/api/answer',{method:'POST',body:JSON.stringify({sessionId:s.sessionId,index:s.index,selected})});
+const s=state.session;const oldChoices=s.choices||curQuestion().choices;const d=await api('/api/answer',{method:'POST',body:JSON.stringify({sessionId:s.sessionId,index:s.index,selected})});
 state.session=d.session;state.answered=true;
 buttons.forEach((b,i)=>{if(i===d.correctIndex){b.classList.add('correct');$('#mark'+i).textContent='✓'}else if(i===d.selected){b.classList.add('wrong');$('#mark'+i).textContent='✕'}else b.classList.add('dim')});
 const f=$('#feedback');f.className='feedback '+(d.ok?'success':'fail');
-f.innerHTML='<div><strong>'+(d.ok?'✅ AJOYIB! +'+d.points+' XP':'💡 '+(d.selected===-1?'VAQT TUGADI!':'TO‘G‘RI JAVOB: '+esc(curDisplayedAnswer(d.correctIndex))))+'</strong><p>'+esc(d.explanation)+'</p></div><button class="btn primary" id="next">'+(d.finished?'🏆 REYTING':'KEYINGI →')+'</button>';
+f.innerHTML='<div><strong>'+(d.ok?'✅ AJOYIB! +'+d.points+' XP':'💡 '+(d.selected===-1?'VAQT TUGADI!':'TO‘G‘RI JAVOB: '+esc(oldChoices[d.correctIndex])))+'</strong><p>'+esc(d.explanation)+'</p></div><button class="btn primary" id="next">'+(d.finished?'🏆 REYTING':'KEYINGI →')+'</button>';
 $('#next').onclick=()=>{if(d.finished){try{localStorage.removeItem('bayroq-quest-session')}catch(e){}play('win');setPhase('result');confetti()}else{play('tap');setPhase('game')}};
 $('#scoreNum').textContent=state.session.score.toLocaleString('en-US');
 play(d.ok?'ok':'fail');
@@ -207,7 +207,6 @@ const f=$('#feedback');f.className='feedback fail';f.innerHTML='<div><strong>⚠
 $('#recover').onclick=restoreSession;state.answered=true;
 }finally{state.saving=false}
 }
-function curDisplayedAnswer(idx){const s=state.session;const prevIndex=Math.max(0,s.index-1);return state.questions[s.order[prevIndex]].choices[idx]}
 function renderResult(){
 const s=state.session,pct=Math.round(s.correct/state.questions.length*100);
 const grade=pct>=90?'AFSONAVIY NATIJA!':pct>=75?'BARAKALLA!':pct>=50?'YAXSHI HARAKAT!':'YANA URINIB KO‘R!';
