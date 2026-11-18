@@ -8,6 +8,7 @@ const questions = require('./questions.json');
 const PORT = Number(process.env.PORT || 3000);
 const DB_NAME = process.env.MONGODB_DB_NAME || 'bayroq_quest';
 let dbPromise;
+let leaderboardCache={expires:0,payload:null};
 const publicQuestions = questions.map((q,id)=>({id,text:q[0],choices:q[1]}));
 function getDatabase(){
  if(!process.env.MONGODB_URI) throw Object.assign(new Error('MongoDB Atlas hali ulanmagan (MONGODB_URI kerak)'),{status:503});
@@ -16,8 +17,11 @@ function getDatabase(){
   try{
    await client.connect();
    const db = client.db(DB_NAME);
-   await db.collection('attempts').createIndex({status:1,score:-1,finishedAt:1});
-   await db.collection('attempts').createIndex({nameKey:1,groupKey:1});
+   // Index creation runs after connection, without blocking the first student.
+   Promise.allSettled([
+     db.collection('attempts').createIndex({status:1,score:-1,finishedAt:1}),
+     db.collection('attempts').createIndex({nameKey:1,groupKey:1})
+   ]).then(items=>items.forEach(x=>{if(x.status==='rejected')console.warn('Index:',x.reason?.message)}));
    return db;
   }catch(e){await client.close().catch(()=>{});throw e;}
  })().catch(err=>{dbPromise=undefined;throw err});
@@ -77,13 +81,14 @@ async function handler(req,res){
  if(req.method==='GET'&&(u.pathname==='/'||u.pathname==='/index.html')){
   fs.readFile(path.join(__dirname,'index.html'),(err,buf)=>{
    if(err){res.writeHead(500);return res.end('Internal error')}
-   res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'public, max-age=120','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data:; font-src 'self' https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'"});res.end(buf);
+   res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-cache, must-revalidate','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data:; font-src 'self' https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'"});res.end(buf);
   });return;
  }
  if(req.method==='GET'&&u.pathname==='/health')return send(res,200,{ok:true,storageConfigured:!!process.env.MONGODB_URI});
  if(req.method==='GET'&&u.pathname==='/api/questions')return send(res,200,{questions:publicQuestions});
  if(req.method==='GET'&&u.pathname==='/api/status'){try{await getDatabase();return send(res,200,{ready:true})}catch(e){return send(res,503,{ready:false,message:'Doimiy baza hozircha ulanmagan. MongoDB Atlas konfiguratsiyasini tekshiring.'})}}
  if(req.method==='GET'&&u.pathname==='/api/leaderboard'){
+  if(leaderboardCache.payload && Date.now()<leaderboardCache.expires)return send(res,200,leaderboardCache.payload);
   const db=await getDatabase();
   const items=await db.collection('attempts').aggregate([
    {$match:{status:'finished'}},
@@ -94,7 +99,9 @@ async function handler(req,res){
    {$limit:100},
    {$project:{_id:0,fullName:1,group:1,score:1,correct:1,wrong:1,maxStreak:1,finishedAt:1}}
   ]).toArray();
-  return send(res,200,{items:items.map((x,i)=>({...x,rank:i+1}))});
+  const payload={items:items.map((x,i)=>({...x,rank:i+1})),generatedAt:new Date().toISOString()};
+  leaderboardCache={payload,expires:Date.now()+20000};
+  return send(res,200,payload);
  }
  if(req.method==='GET'&&u.pathname==='/api/session'){
   const id=u.searchParams.get('id');
@@ -117,25 +124,50 @@ async function handler(req,res){
   return send(res,201,{session:sessionPublic(s)});
  }
  if(req.method==='POST'&&u.pathname==='/api/answer'){
-  rateLimit(req);const input=await body(req),id=input.sessionId;
-  if(typeof id!=='string'||!/^[0-9a-f-]{36}$/.test(id)||!Number.isInteger(input.index)||!Number.isInteger(input.selected)||input.selected< -1||input.selected>3)
+  rateLimit(req);
+  const input=await body(req),id=input.sessionId;
+  if(typeof id!=='string'||!/^[0-9a-f-]{36}$/.test(id)||!Number.isInteger(input.index)||input.index<0||input.index>=questions.length||!Number.isInteger(input.selected)||input.selected< -1||input.selected>3)
    return send(res,400,{error:'Javob parametrlari noto‘g‘ri'});
-  const db=await getDatabase(),collection=db.collection('attempts'),s=await collection.findOne({_id:id});
-  if(!s)return send(res,404,{error:'Urinish topilmadi'});
-  if(s.status!=='active')return send(res,409,{error:'Test allaqachon tugagan',session:sessionPublic(s)});
-  if(input.index!==s.index)return send(res,409,{error:'Savol allaqachon yakunlangan',session:sessionPublic(s)});
-  const now=new Date(),elapsed=Math.max(0,(now-new Date(s.questionAt))/1000),remaining=Math.max(0,s.timeLimit-Math.ceil(elapsed));
-  const chosen=elapsed>s.timeLimit+5?-1:input.selected;
-  const q=questions[s.order[s.index]];
-  const optionOrder=s.optionOrders?.[s.index]||[0,1,2,3]; // Support sessions started before this update.
-  const correctIndex=optionOrder.indexOf(q[2]);
-  const ok=chosen===correctIndex,nextIndex=s.index+1,finished=nextIndex>=questions.length;
-  const streak=ok?s.streak+1:0,points=ok?500+Math.round(remaining/s.timeLimit*500)+Math.min(streak-1,5)*100:0;
-  const patch={$set:{index:nextIndex,score:s.score+points,correct:s.correct+(ok?1:0),wrong:s.wrong+(ok?0:1),streak,maxStreak:Math.max(s.maxStreak,streak),
-      questionAt:now,status:finished?'finished':'active',...(finished?{finishedAt:now}:{})}};
-  const changed=await collection.updateOne({_id:id,index:s.index,status:'active'},patch);
-  if(changed.modifiedCount!==1)return send(res,409,{error:'Bu savolga allaqachon javob berilgan. Sahifani yangilang.'});
-  return send(res,200,{ok,correctIndex,explanation:q[3],points,selected:chosen,finished,session:sessionPublic({...s,...patch.$set})});
+  const db=await getDatabase(),now=new Date();
+  const coll=db.collection('attempts'),selected=input.selected;
+  const answers=questions.map(q=>q[2]);
+  // Atomically grade & save with ONE MongoDB round trip.
+  // Older in-progress attempts without optionOrders retain their original answer order.
+  const qId={$arrayElemAt:['$order','$index']};
+  const originalCorrect={$arrayElemAt:[{$literal:answers},qId]};
+  const positions={$arrayElemAt:['$optionOrders','$index']};
+  const correctIndex={$ifNull:[{$indexOfArray:[positions,originalCorrect]},originalCorrect]};
+  const elapsed={$max:[0,{$divide:[{$subtract:[now,'$questionAt']},1000]}]};
+  const update=[
+   {$set:{_correctPosition:correctIndex,_elapsed:elapsed}},
+   {$set:{_selected:{$cond:[{$gt:['$_elapsed',{$add:['$timeLimit',5]}]},-1,selected]},
+           _remaining:{$max:[0,{$subtract:['$timeLimit',{$ceil:'$_elapsed'}]}]}}},
+   {$set:{_wasCorrect:{$eq:['$_selected','$_correctPosition']}}},
+   {$set:{_newStreak:{$cond:['$_wasCorrect',{$add:['$streak',1]},0]}}},
+   {$set:{_earned:{$cond:['$_wasCorrect',{$add:[
+       500,{$round:[{$multiply:[{$divide:['$_remaining','$timeLimit']},500]},0]},
+       {$multiply:[{$min:[{$subtract:['$_newStreak',1]},5]},100]}
+      ]},0]}}},
+   {$set:{
+     lastAnswer:{selected:'$_selected',correctIndex:'$_correctPosition',points:'$_earned',ok:'$_wasCorrect',questionId:qId},
+     score:{$add:['$score','$_earned']},
+     correct:{$add:['$correct',{$cond:['$_wasCorrect',1,0]}]},
+     wrong:{$add:['$wrong',{$cond:['$_wasCorrect',0,1]}]},
+     streak:'$_newStreak',
+     maxStreak:{$max:['$maxStreak','$_newStreak']},
+     status:{$cond:[{$eq:[{$add:['$index',1]},questions.length]},'finished','active']},
+     finishedAt:{$cond:[{$eq:[{$add:['$index',1]},questions.length]},now,'$finishedAt']},
+     questionAt:now,
+     index:{$add:['$index',1]}
+   }},
+   {$unset:['_correctPosition','_elapsed','_selected','_remaining','_wasCorrect','_newStreak','_earned']}
+  ];
+  const s=await coll.findOneAndUpdate({_id:id,index:input.index,status:'active'},update,{returnDocument:'after'});
+  if(!s)return send(res,409,{error:'Savol allaqachon yakunlangan yoki urinish topilmadi. Sahifani yangilang.'});
+  const last=s.lastAnswer;
+  const q=questions[last.questionId];
+  if(s.status==='finished')leaderboardCache.expires=0;
+  return send(res,200,{ok:last.ok,correctIndex:last.correctIndex,explanation:q[3],points:last.points,selected:last.selected,finished:s.status==='finished',session:sessionPublic(s)});
  }
  return send(res,404,{error:'Sahifa topilmadi'});
 }
