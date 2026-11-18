@@ -1,11 +1,15 @@
 {
   "name": "bayroq-quest",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
+  "description": "Uzbekistan flag multiplayer-independent student quiz with persistent MongoDB leaderboard",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
+  },
+  "dependencies": {
+    "mongodb": "^6.20.0"
   }
 }
