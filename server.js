@@ -46,7 +46,32 @@ function rateLimit(req){
 }
 function canonical(s,max=80){return typeof s==='string'?s.trim().replace(/\s+/g,' ').slice(0,max):''}
 function shuffle(arr){for(let i=arr.length-1;i>0;i--){const j=crypto.randomInt(i+1);[arr[i],arr[j]]=[arr[j],arr[i]]}return arr}
-function sessionPublic(s){return {sessionId:s._id,fullName:s.fullName,group:s.group,timeLimit:s.timeLimit,order:s.order,index:s.index,score:s.score,correct:s.correct,wrong:s.wrong,streak:s.streak,maxStreak:s.maxStreak,status:s.status,questionAt:s.questionAt,finishedAt:s.finishedAt};}
+// Generate a balanced answer-key position distribution: 25 questions = 6/6/6/7.
+// Prevent long runs of the same correct answer position for fair gameplay.
+function makeOptionOrders(questionOrder){
+ const n=questionOrder.length;
+ const slots=Array.from({length:Math.floor(n/4)},()=>[0,1,2,3]).flat();
+ const extra=shuffle([0,1,2,3]).slice(0,n%4);
+ const bag=[...slots,...extra];
+ let positions;
+ for(let attempt=0;attempt<300;attempt++){
+  positions=shuffle([...bag]);
+  if(!positions.some((p,i)=>i>=2&&p===positions[i-1]&&p===positions[i-2]))break;
+ }
+ return questionOrder.map((questionId,i)=>{
+  const originalCorrect=questions[questionId][2];
+  const order=shuffle([0,1,2,3].filter(n=>n!==originalCorrect));
+  order.splice(positions[i],0,originalCorrect);
+  return order;
+ });
+}
+function choicesFor(s){
+ if(s.status!=='active'||s.index>=questions.length)return null;
+ const q=questions[s.order[s.index]];
+ const indices=s.optionOrders?.[s.index]||[0,1,2,3];
+ return indices.map(i=>q[1][i]);
+}
+function sessionPublic(s){return {sessionId:s._id,fullName:s.fullName,group:s.group,timeLimit:s.timeLimit,order:s.order,index:s.index,score:s.score,correct:s.correct,wrong:s.wrong,streak:s.streak,maxStreak:s.maxStreak,status:s.status,questionAt:s.questionAt,finishedAt:s.finishedAt,choices:choicesFor(s)};}
 async function handler(req,res){
  const u=new URL(req.url,'http://localhost');
  if(req.method==='GET'&&(u.pathname==='/'||u.pathname==='/index.html')){
@@ -87,6 +112,7 @@ async function handler(req,res){
   const s={_id:crypto.randomUUID(),fullName,group,nameKey:fullName.toLocaleLowerCase('uz'),groupKey:group.toLocaleLowerCase('uz'),timeLimit:limit,
     order:input.shuffle===false?questions.map((_,i)=>i):shuffle(questions.map((_,i)=>i)),
     index:0,score:0,correct:0,wrong:0,streak:0,maxStreak:0,status:'active',questionAt:now,createdAt:now,finishedAt:null};
+  s.optionOrders=makeOptionOrders(s.order);
   await db.collection('attempts').insertOne(s);
   return send(res,201,{session:sessionPublic(s)});
  }
@@ -100,13 +126,16 @@ async function handler(req,res){
   if(input.index!==s.index)return send(res,409,{error:'Savol allaqachon yakunlangan',session:sessionPublic(s)});
   const now=new Date(),elapsed=Math.max(0,(now-new Date(s.questionAt))/1000),remaining=Math.max(0,s.timeLimit-Math.ceil(elapsed));
   const chosen=elapsed>s.timeLimit+5?-1:input.selected;
-  const q=questions[s.order[s.index]],ok=chosen===q[2],nextIndex=s.index+1,finished=nextIndex>=questions.length;
+  const q=questions[s.order[s.index]];
+  const optionOrder=s.optionOrders?.[s.index]||[0,1,2,3]; // Support sessions started before this update.
+  const correctIndex=optionOrder.indexOf(q[2]);
+  const ok=chosen===correctIndex,nextIndex=s.index+1,finished=nextIndex>=questions.length;
   const streak=ok?s.streak+1:0,points=ok?500+Math.round(remaining/s.timeLimit*500)+Math.min(streak-1,5)*100:0;
   const patch={$set:{index:nextIndex,score:s.score+points,correct:s.correct+(ok?1:0),wrong:s.wrong+(ok?0:1),streak,maxStreak:Math.max(s.maxStreak,streak),
       questionAt:now,status:finished?'finished':'active',...(finished?{finishedAt:now}:{})}};
   const changed=await collection.updateOne({_id:id,index:s.index,status:'active'},patch);
   if(changed.modifiedCount!==1)return send(res,409,{error:'Bu savolga allaqachon javob berilgan. Sahifani yangilang.'});
-  return send(res,200,{ok,correctIndex:q[2],explanation:q[3],points,selected:chosen,finished,session:{...sessionPublic(s),...patch.$set}});
+  return send(res,200,{ok,correctIndex,explanation:q[3],points,selected:chosen,finished,session:sessionPublic({...s,...patch.$set})});
  }
  return send(res,404,{error:'Sahifa topilmadi'});
 }
